@@ -50,6 +50,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--patience", type=int, default=8)
+    ap.add_argument("--use", default="post", help="image the single-image models see: post or pre")
     ap.add_argument("--test", action="store_true", help="score best.pt on the TEST split (use once, at the end)")
     a = ap.parse_args()
 
@@ -62,7 +63,7 @@ def main():
     tl = DataLoader(tr, batch_size=a.bs, shuffle=True, num_workers=a.workers, drop_last=True, pin_memory=True)
     vl = DataLoader(va, batch_size=2, num_workers=a.workers)
 
-    model = build_model(a.model).to(dev)
+    model = build_model(a.model, use=a.use).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=dev == "cuda")
