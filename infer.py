@@ -104,6 +104,8 @@ def main():
             counts.append(impact(b[0], b[1], b[2], b[3], a.mpp))
         mean = s1 / a.passes
         std = (s2 / a.passes - mean ** 2).clamp_min(0).sqrt()
+        y_np = y.cpu().numpy()
+        gt = impact(y_np[0] > 0.5, y_np[1] > 0.5, y_np[2] > 0.5, y_np[3] > 0.5, a.mpp)  # true values, same definition
         counts = np.array(counts)  # passes x 3
         lo, hi = np.percentile(counts, 5, axis=0), np.percentile(counts, 95, axis=0)
         mu = counts.mean(0)
@@ -111,10 +113,11 @@ def main():
                          "flooded_buildings": mu[0], "fb_low": lo[0], "fb_high": hi[0],
                          "flooded_road_m": mu[1], "road_low": lo[1], "road_high": hi[1],
                          "flooded_area_m2": mu[2], "area_low": lo[2], "area_high": hi[2],
-                         "mean_uncertainty": std[0, 2:].mean().item()})
+                         "mean_uncertainty": std[0, 2:].mean().item(),
+                         "gt_flooded_buildings": gt[0], "gt_flooded_road_m": gt[1], "gt_flooded_area_m2": gt[2]})
 
         # reliability + uncertainty/error bins (pixels of the full image, per channel)
-        m_np, s_np, y_np = mean[0].cpu().numpy(), std[0].cpu().numpy(), y.cpu().numpy()
+        m_np, s_np = mean[0].cpu().numpy(), std[0].cpu().numpy()
         for c in range(4):
             bi = np.minimum((m_np[c] * NB).astype(int), NB - 1).ravel()
             rel_n[c] += np.bincount(bi, minlength=NB)
@@ -139,7 +142,19 @@ def main():
         print(f"{i + 1}/{len(ids)} {id_}  buildings {mu[0]:.0f} [{lo[0]:.0f}-{hi[0]:.0f}]  "
               f"road {mu[1]:.0f}m  area {mu[2]:.0f}m2", flush=True)
 
-    pd.DataFrame(img_rows).to_csv(f"{a.out}/impact_per_image.csv", index=False)
+    df = pd.DataFrame(img_rows)
+    df.to_csv(f"{a.out}/impact_per_image.csv", index=False)
+    summ = {}
+    for nm, lo_, hi_, mu_, gt_ in [("flooded_buildings", "fb_low", "fb_high", "flooded_buildings", "gt_flooded_buildings"),
+                                   ("flooded_road_m", "road_low", "road_high", "flooded_road_m", "gt_flooded_road_m"),
+                                   ("flooded_area_m2", "area_low", "area_high", "flooded_area_m2", "gt_flooded_area_m2")]:
+        inside = ((df[gt_] >= df[lo_]) & (df[gt_] <= df[hi_])).mean()
+        summ[nm] = {"range_covers_truth": float(inside), "mae": float((df[mu_] - df[gt_]).abs().mean()),
+                    "mean_truth": float(df[gt_].mean()), "mean_pred": float(df[mu_].mean()),
+                    "corr": float(np.corrcoef(df[mu_], df[gt_])[0, 1]) if df[gt_].std() > 0 and df[mu_].std() > 0 else None,
+                    "mean_range_width": float((df[hi_] - df[lo_]).mean())}
+    json.dump(summ, open(f"{a.out}/impact_summary.json", "w"), indent=1)
+    print("IMPACT vs truth:", json.dumps(summ))
     g = pd.DataFrame(grid_rows)
     # priority score: equal-weight mean of the three min-max-normalised impacts; low confidence if uncertainty is high
     for col in ["flooded_buildings", "flooded_road_m", "flooded_area_m2"]:

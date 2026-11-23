@@ -11,16 +11,20 @@ from models import build_model
 THS = [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5]
 
 
-def dice_bce(logits, y):
-    bce = F.binary_cross_entropy_with_logits(logits, y)
+def dice_bce(logits, y, w=None):
+    """BCE + soft Dice per channel; w = per-channel weights (e.g. more weight on the flooded channels)."""
+    bce = F.binary_cross_entropy_with_logits(logits, y, reduction="none").mean((0, 2, 3))
     p = torch.sigmoid(logits)
     inter = (p * y).sum((0, 2, 3))
     den = p.sum((0, 2, 3)) + y.sum((0, 2, 3))
-    return bce + (1 - (2 * inter + 1) / (den + 1)).mean()
+    per = bce + (1 - (2 * inter + 1) / (den + 1))
+    if w is None:
+        return per.mean()
+    return (per * w).sum() / w.sum()
 
 
 @torch.no_grad()
-def evaluate(model, loader, dev, thr=None):
+def evaluate(model, loader, dev, thr=None, tta=False):
     """thr=None : try every threshold in THS and keep the best one per channel (use on VALIDATION).
     thr=[t0..t3]: use these fixed thresholds (use on TEST, with the ones chosen on validation)."""
     model.eval()
@@ -35,7 +39,13 @@ def evaluate(model, loader, dev, thr=None):
         pre, post, y = pre.to(dev), post.to(dev), y.to(dev)
         with torch.autocast("cuda", enabled=dev == "cuda"):
             out = model(pre, post)
-        p = torch.sigmoid(out.float())[:, :, :1300, :1300]  # cut the padding off
+            p = torch.sigmoid(out.float())
+            if tta:  # average with the left-right and up-down flipped predictions
+                for dims in ([3], [2]):
+                    o2 = model(pre.flip(dims), post.flip(dims))
+                    p = p + torch.sigmoid(o2.float()).flip(dims)
+                p = p / 3
+        p = p[:, :, :1300, :1300]  # cut the padding off
         y = y[:, :, :1300, :1300]
         for k in range(K):
             b = (p > T[k].view(1, n, 1, 1)).float()
@@ -69,6 +79,10 @@ def main():
     ap.add_argument("--use", default="post", help="image the single-image models see: post or pre")
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--weights", default="imagenet")
+    ap.add_argument("--flood_w", type=float, default=1.0, help="loss weight of the two flooded channels")
+    ap.add_argument("--tta", action="store_true", help="flip test-time augmentation for the final thresholds + test")
+    ap.add_argument("--trainval", action="store_true", help="also train on the validation pairs (needs --thr_file)")
+    ap.add_argument("--thr_file", default=None, help="thresholds.json of an earlier validated run (for --trainval)")
     ap.add_argument("--test", action="store_true", help="score best.pt on the TEST split (use once, at the end)")
     a = ap.parse_args()
 
@@ -76,7 +90,8 @@ def main():
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(a.out, exist_ok=True)
 
-    tr = FloodDataset(a.folder, get_ids(a.pairs, "train"), train=True)
+    ids_tr = get_ids(a.pairs, "train") + (get_ids(a.pairs, "val") if a.trainval else [])
+    tr = FloodDataset(a.folder, ids_tr, train=True)
     va = FloodDataset(a.folder, get_ids(a.pairs, "val"))
     tl = DataLoader(tr, batch_size=a.bs, shuffle=True, num_workers=a.workers, drop_last=True, pin_memory=True)
     vl = DataLoader(va, batch_size=2, num_workers=a.workers)
@@ -86,6 +101,7 @@ def main():
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=dev == "cuda")
 
+    lw = torch.tensor([1.0, 1.0, a.flood_w, a.flood_w], device=dev)
     best, bad, hist = -1.0, 0, []
     print(f"{a.model} | {dev} | train crops {len(tr)} | val pairs {len(va)}")
     for ep in range(1, a.epochs + 1):
@@ -96,7 +112,7 @@ def main():
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=dev == "cuda"):
                 out = model(pre, post)
-            loss = dice_bce(out.float(), y)
+            loss = dice_bce(out.float(), y, lw)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
@@ -108,6 +124,9 @@ def main():
         print(f"ep {ep:2d} loss {tot / n:.4f} | val mIoU {m['mean_iou']:.4f} F1 {m['mean_f1']:.4f} "
               f"| IoU {np.round(m['iou'], 3)} | thr {np.round(m['thresholds'], 2)} | {time.time() - t0:.0f}s", flush=True)
         json.dump(hist, open(f"{a.out}/history.json", "w"), indent=1)
+        if a.trainval:  # validation is part of the training data, so no model selection: keep the last epoch
+            torch.save(model.state_dict(), f"{a.out}/best.pt")
+            continue
         if m["mean_iou"] > best:
             best, bad = m["mean_iou"], 0
             torch.save(model.state_dict(), f"{a.out}/best.pt")
@@ -121,12 +140,18 @@ def main():
 
     if a.test:
         model.load_state_dict(torch.load(f"{a.out}/best.pt", map_location=dev))
-        thr = json.load(open(f"{a.out}/thresholds.json"))  # thresholds chosen on VALIDATION
+        if a.trainval:
+            thr = json.load(open(a.thr_file))  # thresholds of the validated run
+        else:
+            mv = evaluate(model, vl, dev, None, a.tta)  # pick thresholds on validation (with TTA if asked)
+            thr = mv["thresholds"]
+            json.dump(mv, open(f"{a.out}/best_val.json", "w"), indent=1)
+            print("VAL (final):", {k: (round(v, 4) if isinstance(v, float) else np.round(v, 3)) for k, v in mv.items()})
+        json.dump(thr, open(f"{a.out}/thresholds.json", "w"))
         te = DataLoader(FloodDataset(a.folder, get_ids(a.pairs, "test")), batch_size=2, num_workers=a.workers)
-        res = evaluate(model, te, dev, thr)
+        res = evaluate(model, te, dev, thr, a.tta)
         json.dump(res, open(f"{a.out}/test_metrics.json", "w"), indent=1)
         print("TEST:", {k: (round(v, 4) if isinstance(v, float) else np.round(v, 3)) for k, v in res.items()})
-
 
 if __name__ == "__main__":
     main()
