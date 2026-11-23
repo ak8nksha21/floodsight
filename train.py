@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader
 from data import CHANNELS, FloodDataset, get_ids
 from models import build_model
 
+THS = [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5]
+
 
 def dice_bce(logits, y):
     bce = F.binary_cross_entropy_with_logits(logits, y)
@@ -18,23 +20,37 @@ def dice_bce(logits, y):
 
 
 @torch.no_grad()
-def evaluate(model, loader, dev, thr=0.5):
+def evaluate(model, loader, dev, thr=None):
+    """thr=None : try every threshold in THS and keep the best one per channel (use on VALIDATION).
+    thr=[t0..t3]: use these fixed thresholds (use on TEST, with the ones chosen on validation)."""
     model.eval()
     n = len(CHANNELS)
-    tp, fp, fn = torch.zeros(n), torch.zeros(n), torch.zeros(n)
+    if thr is None:
+        T = torch.tensor(THS, dtype=torch.float32).view(-1, 1).expand(-1, n).to(dev)
+    else:
+        T = torch.tensor(thr, dtype=torch.float32).view(1, n).to(dev)
+    K = T.shape[0]
+    tp, fp, fn = (torch.zeros(K, n, device=dev, dtype=torch.float64) for _ in range(3))
     for pre, post, y in loader:
         pre, post, y = pre.to(dev), post.to(dev), y.to(dev)
         with torch.autocast("cuda", enabled=dev == "cuda"):
             out = model(pre, post)
-        p = (torch.sigmoid(out.float()) > thr).float()[:, :, :1300, :1300]  # cut the padding off
+        p = torch.sigmoid(out.float())[:, :, :1300, :1300]  # cut the padding off
         y = y[:, :, :1300, :1300]
-        tp += (p * y).sum((0, 2, 3)).cpu()
-        fp += (p * (1 - y)).sum((0, 2, 3)).cpu()
-        fn += ((1 - p) * y).sum((0, 2, 3)).cpu()
+        for k in range(K):
+            b = (p > T[k].view(1, n, 1, 1)).float()
+            tp[k] += (b * y).sum((0, 2, 3)).double()
+            fp[k] += (b * (1 - y)).sum((0, 2, 3)).double()
+            fn[k] += ((1 - b) * y).sum((0, 2, 3)).double()
     e = 1e-9
+    iou_all = tp / (tp + fp + fn + e)
+    ar = torch.arange(n, device=dev)
+    best = iou_all.argmax(0) if thr is None else torch.zeros(n, dtype=torch.long, device=dev)
+    tp, fp, fn, T = tp[best, ar], fp[best, ar], fn[best, ar], T[best, ar]
     iou, f1 = tp / (tp + fp + fn + e), 2 * tp / (2 * tp + fp + fn + e)
     prec, rec = tp / (tp + fp + e), tp / (tp + fn + e)
-    return {"iou": iou.tolist(), "f1": f1.tolist(), "precision": prec.tolist(), "recall": rec.tolist(),
+    return {"thresholds": T.tolist(), "iou": iou.tolist(), "f1": f1.tolist(),
+            "precision": prec.tolist(), "recall": rec.tolist(),
             "mean_iou": iou.mean().item(), "mean_f1": f1.mean().item()}
 
 
@@ -52,6 +68,7 @@ def main():
     ap.add_argument("--patience", type=int, default=8)
     ap.add_argument("--use", default="post", help="image the single-image models see: post or pre")
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--weights", default="imagenet")
     ap.add_argument("--test", action="store_true", help="score best.pt on the TEST split (use once, at the end)")
     a = ap.parse_args()
 
@@ -64,7 +81,7 @@ def main():
     tl = DataLoader(tr, batch_size=a.bs, shuffle=True, num_workers=a.workers, drop_last=True, pin_memory=True)
     vl = DataLoader(va, batch_size=2, num_workers=a.workers)
 
-    model = build_model(a.model, use=a.use, dropout=a.dropout).to(dev)
+    model = build_model(a.model, weights=a.weights, use=a.use, dropout=a.dropout).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=dev == "cuda")
@@ -89,11 +106,13 @@ def main():
         m = evaluate(model, vl, dev)
         hist.append({"epoch": ep, "train_loss": tot / n, "val": m})
         print(f"ep {ep:2d} loss {tot / n:.4f} | val mIoU {m['mean_iou']:.4f} F1 {m['mean_f1']:.4f} "
-              f"| IoU {np.round(m['iou'], 3)} | {time.time() - t0:.0f}s", flush=True)
+              f"| IoU {np.round(m['iou'], 3)} | thr {np.round(m['thresholds'], 2)} | {time.time() - t0:.0f}s", flush=True)
         json.dump(hist, open(f"{a.out}/history.json", "w"), indent=1)
         if m["mean_iou"] > best:
             best, bad = m["mean_iou"], 0
             torch.save(model.state_dict(), f"{a.out}/best.pt")
+            json.dump(m["thresholds"], open(f"{a.out}/thresholds.json", "w"))
+            json.dump(m, open(f"{a.out}/best_val.json", "w"), indent=1)
         else:
             bad += 1
             if bad >= a.patience:
@@ -102,8 +121,9 @@ def main():
 
     if a.test:
         model.load_state_dict(torch.load(f"{a.out}/best.pt", map_location=dev))
+        thr = json.load(open(f"{a.out}/thresholds.json"))  # thresholds chosen on VALIDATION
         te = DataLoader(FloodDataset(a.folder, get_ids(a.pairs, "test")), batch_size=2, num_workers=a.workers)
-        res = evaluate(model, te, dev)
+        res = evaluate(model, te, dev, thr)
         json.dump(res, open(f"{a.out}/test_metrics.json", "w"), indent=1)
         print("TEST:", {k: (round(v, 4) if isinstance(v, float) else np.round(v, 3)) for k, v in res.items()})
 
