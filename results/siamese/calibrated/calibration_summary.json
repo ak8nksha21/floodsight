@@ -1,0 +1,52 @@
+{
+ "params": {
+  "buildings": {
+   "ratio_low": 0.02541410881537867,
+   "ratio_median": 0.6289308176100629,
+   "ratio_high": 1.1633060532441604,
+   "eps": 1.0
+  },
+  "road_m": {
+   "ratio_low": 0.05723811971371098,
+   "ratio_median": 0.5904581955597544,
+   "ratio_high": 1.7002384448457672,
+   "eps": 50.0
+  },
+  "area_m2": {
+   "ratio_low": 0.05955797455171757,
+   "ratio_median": 0.7393897435324799,
+   "ratio_high": 1.5618023099179292,
+   "eps": 500.0
+  }
+ },
+ "summary": {
+  "buildings": {
+   "coverage_val": 0.8962962962962963,
+   "coverage_test": 0.8617886178861789,
+   "mae_raw_test": 10.750406504065039,
+   "mae_cal_test": 7.0191747200490875,
+   "mean_truth_test": 2.5609756097560976,
+   "mean_cal_pred_test": 7.776703993455028,
+   "mean_width_test": 14.958478534066574
+  },
+  "road_m": {
+   "coverage_val": 0.8962962962962963,
+   "coverage_test": 0.6341463414634146,
+   "mae_raw_test": 536.7743089430895,
+   "mae_cal_test": 403.3467669773533,
+   "mean_truth_test": 310.14959349593505,
+   "mean_cal_pred_test": 246.1588534165928,
+   "mean_width_test": 789.9192121216017
+  },
+  "area_m2": {
+   "coverage_val": 0.8962962962962963,
+   "coverage_test": 0.6747967479674797,
+   "mae_raw_test": 3537.573073170732,
+   "mae_cal_test": 2974.8186538703494,
+   "mean_truth_test": 2078.6237398373987,
+   "mean_cal_pred_test": 2410.2480027641036,
+   "mean_width_test": 5578.872056146155
+  }
+ },
+ "level": 0.9
+}
