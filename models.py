@@ -57,8 +57,8 @@ class SiameseMultiTask(nn.Module):
             DecoderBlock(ch[5], ch[4], dec[0], dropout),
             DecoderBlock(dec[0], ch[3], dec[1], dropout),
             DecoderBlock(dec[1], ch[2], dec[2], dropout),
-            DecoderBlock(dec[2], ch[1], dec[3], dropout),
-            DecoderBlock(dec[3], 0, dec[4], dropout),
+            DecoderBlock(dec[2], ch[1], dec[3], 0.0),
+            DecoderBlock(dec[3], 0, dec[4], 0.0),
         ])
         self.head_infra = nn.Conv2d(dec[4], 2, 1)
         self.head_flood = nn.Conv2d(dec[4], 2, 1)
