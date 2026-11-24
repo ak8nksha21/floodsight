@@ -8,11 +8,13 @@ ap.add_argument("--name", required=True)
 ap.add_argument("--run", required=True)
 ap.add_argument("--outputs", default=None)
 ap.add_argument("--dest", default="results")
+ap.add_argument("--no_weights", action="store_true", help="metrics only (weights too big for GitHub)")
 a = ap.parse_args()
 d = f"{a.dest}/{a.name}"
 os.makedirs(d, exist_ok=True)
-sd = torch.load(f"{a.run}/best.pt", map_location="cpu")
-torch.save({k: (v.half() if v.is_floating_point() else v) for k, v in sd.items()}, f"{d}/best_fp16.pth")
+if not a.no_weights:
+    sd = torch.load(f"{a.run}/best.pt", map_location="cpu")
+    torch.save({k: (v.half() if v.is_floating_point() else v) for k, v in sd.items()}, f"{d}/best_fp16.pth")
 for f in ["thresholds.json", "best_val.json", "history.json", "test_metrics.json"]:
     if os.path.exists(f"{a.run}/{f}"):
         shutil.copy(f"{a.run}/{f}", d)

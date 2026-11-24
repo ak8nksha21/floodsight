@@ -79,6 +79,11 @@ def main():
     ap.add_argument("--use", default="post", help="image the single-image models see: post or pre")
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--weights", default="imagenet")
+    ap.add_argument("--encoder", default="resnet34", help="encoder of siamese / single_mt (e.g. resnet34, resnet50)")
+    ap.add_argument("--ema", type=float, default=0.0, help="EMA decay of the weights (0 = off, 0.999 is typical)")
+    ap.add_argument("--crop", type=int, default=512)
+    ap.add_argument("--repeat", type=int, default=2, help="random crops per pair per epoch")
+    ap.add_argument("--max_minutes", type=float, default=0, help="stop training after this many minutes (0 = no limit)")
     ap.add_argument("--flood_w", type=float, default=1.0, help="loss weight of the two flooded channels")
     ap.add_argument("--tta", action="store_true", help="flip test-time augmentation for the final thresholds + test")
     ap.add_argument("--trainval", action="store_true", help="also train on the validation pairs (needs --thr_file)")
@@ -91,12 +96,17 @@ def main():
     os.makedirs(a.out, exist_ok=True)
 
     ids_tr = get_ids(a.pairs, "train") + (get_ids(a.pairs, "val") if a.trainval else [])
-    tr = FloodDataset(a.folder, ids_tr, train=True)
+    tr = FloodDataset(a.folder, ids_tr, train=True, crop=a.crop, repeat=a.repeat)
     va = FloodDataset(a.folder, get_ids(a.pairs, "val"))
     tl = DataLoader(tr, batch_size=a.bs, shuffle=True, num_workers=a.workers, drop_last=True, pin_memory=True)
     vl = DataLoader(va, batch_size=2, num_workers=a.workers)
 
-    model = build_model(a.model, weights=a.weights, use=a.use, dropout=a.dropout).to(dev)
+    model = build_model(a.model, weights=a.weights, use=a.use, dropout=a.dropout, encoder=a.encoder).to(dev)
+    ema = None
+    if a.ema > 0:
+        from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+        ema = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(a.ema), use_buffers=True)
+    T0 = time.time()
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=dev == "cuda")
@@ -116,20 +126,22 @@ def main():
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
+            if ema is not None: ema.update_parameters(model)
             tot += loss.item() * pre.size(0)
             n += pre.size(0)
         sched.step()
-        m = evaluate(model, vl, dev)
+        em = ema.module if ema is not None else model  # the model that is scored and saved
+        m = evaluate(em, vl, dev)
         hist.append({"epoch": ep, "train_loss": tot / n, "val": m})
         print(f"ep {ep:2d} loss {tot / n:.4f} | val mIoU {m['mean_iou']:.4f} F1 {m['mean_f1']:.4f} "
               f"| IoU {np.round(m['iou'], 3)} | thr {np.round(m['thresholds'], 2)} | {time.time() - t0:.0f}s", flush=True)
         json.dump(hist, open(f"{a.out}/history.json", "w"), indent=1)
         if a.trainval:  # validation is part of the training data, so no model selection: keep the last epoch
-            torch.save(model.state_dict(), f"{a.out}/best.pt")
+            torch.save(em.state_dict(), f"{a.out}/best.pt")
             continue
         if m["mean_iou"] > best:
             best, bad = m["mean_iou"], 0
-            torch.save(model.state_dict(), f"{a.out}/best.pt")
+            torch.save(em.state_dict(), f"{a.out}/best.pt")
             json.dump(m["thresholds"], open(f"{a.out}/thresholds.json", "w"))
             json.dump(m, open(f"{a.out}/best_val.json", "w"), indent=1)
         else:
@@ -137,8 +149,12 @@ def main():
             if bad >= a.patience:
                 print("early stop")
                 break
+        if a.max_minutes and (time.time() - T0) / 60 > a.max_minutes:
+            print("time budget reached, stopping")
+            break
 
     if a.test:
+        model = em
         model.load_state_dict(torch.load(f"{a.out}/best.pt", map_location=dev))
         if a.trainval:
             thr = json.load(open(a.thr_file))  # thresholds of the validated run

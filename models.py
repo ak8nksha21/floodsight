@@ -29,9 +29,9 @@ class SiameseUnet(nn.Module):
     Head 1 -> building, road.   Head 2 -> flooded building, flooded road.
     Dropout2d on the three deepest feature levels is what MC Dropout uses at inference."""
 
-    def __init__(self, use_pre=True, weights="imagenet", dropout=0.1):
+    def __init__(self, use_pre=True, weights="imagenet", dropout=0.1, encoder="resnet34"):
         super().__init__()
-        base = smp.Unet("resnet34", encoder_weights=weights, classes=N_OUT)
+        base = smp.Unet(encoder, encoder_weights=weights, classes=N_OUT)
         self.encoder, self.decoder = base.encoder, base.decoder
         self.use_pre = use_pre
         ch = list(self.encoder.out_channels)  # [3, 64, 64, 128, 256, 512]
@@ -111,7 +111,7 @@ class ResNet3dUnet(nn.Module):
         return torch.cat([self.head_infra(x), self.head_flood(x)], dim=1)
 
 
-def build_model(name, weights="imagenet", use="post", dropout=0.1):
+def build_model(name, weights="imagenet", use="post", dropout=0.1, encoder="resnet34"):
     w = None if weights in (None, "none") else weights
     if name == "unet":
         return PostOnly(smp.Unet("resnet34", encoder_weights=w, classes=N_OUT), use)
@@ -120,9 +120,9 @@ def build_model(name, weights="imagenet", use="post", dropout=0.1):
     if name == "deeplab":
         return PostOnly(smp.DeepLabV3Plus("resnet34", encoder_weights=w, classes=N_OUT), use)
     if name == "single_mt":
-        return SiameseUnet(use_pre=False, weights=w, dropout=dropout)
+        return SiameseUnet(use_pre=False, weights=w, dropout=dropout, encoder=encoder)
     if name == "siamese":
-        return SiameseUnet(use_pre=True, weights=w, dropout=dropout)
+        return SiameseUnet(use_pre=True, weights=w, dropout=dropout, encoder=encoder)
     if name == "resnet3d":
         return ResNet3dUnet(weights=w, dropout=dropout)
     raise ValueError(f"unknown model: {name}")
