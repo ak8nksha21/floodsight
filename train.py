@@ -84,6 +84,9 @@ def main():
     ap.add_argument("--crop", type=int, default=512)
     ap.add_argument("--repeat", type=int, default=2, help="random crops per pair per epoch")
     ap.add_argument("--max_minutes", type=float, default=0, help="stop training after this many minutes (0 = no limit)")
+    ap.add_argument("--train_areas", default=None, help="e.g. ger_0,lou_1 (default split if omitted)")
+    ap.add_argument("--val_area", default=None)
+    ap.add_argument("--test_area", default=None)
     ap.add_argument("--flood_w", type=float, default=1.0, help="loss weight of the two flooded channels")
     ap.add_argument("--tta", action="store_true", help="flip test-time augmentation for the final thresholds + test")
     ap.add_argument("--trainval", action="store_true", help="also train on the validation pairs (needs --thr_file)")
@@ -91,6 +94,10 @@ def main():
     ap.add_argument("--test", action="store_true", help="score best.pt on the TEST split (use once, at the end)")
     a = ap.parse_args()
 
+    if a.train_areas:  # custom area split (for rotating the held-out area)
+        import data as _data
+        _data.SPLIT_AREAS = {"train": a.train_areas.split(","), "val": [a.val_area], "test": [a.test_area]}
+        print("areas:", _data.SPLIT_AREAS)
     random.seed(a.seed); np.random.seed(a.seed); torch.manual_seed(a.seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(a.out, exist_ok=True)
